@@ -1,0 +1,63 @@
+# =========================
+# Build folders
+# =========================
+Debug/
+Release/
+build/
+out/
+
+# =========================
+# Binaries / outputs
+# =========================
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+
+# =========================
+# STM32CubeIDE / Eclipse
+# =========================
+.metadata/
+.settings/
+*.launch
+
+# Generated project files (keep .project and .cproject!)
+*.log
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Temporary / cache
+# =========================
+*.o
+*.d
+*.su
+*.tmp
+
+# =========================
+# CubeMX generated backups
+# =========================
+*.bak
+*.orig
+
+# =========================
+# VSCode (if you ever use it)
+# =========================
+.vscode/
+
+# =========================
+# Python (if you script IoT-LAB later)
+# =========================
+__pycache__/
+*.pyc
+
+# =========================
+# Misc
+# =========================
+*.swp
+*.swo
