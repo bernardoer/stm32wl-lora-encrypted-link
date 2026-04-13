@@ -30,6 +30,8 @@
 #include "utilities_def.h"
 #include "app_version.h"
 #include "subghz_phy_version.h"
+#include "aes.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* External variables ---------------------------------------------------------*/
@@ -193,6 +195,7 @@ void SubghzApp_Init(void)
   RadioEvents.RxError = OnRxError;
 
   Radio.Init(&RadioEvents);
+  MX_AES_Init();
 
   /* USER CODE BEGIN SubghzApp_Init_2 */
   /*calculate random delay for synchronization*/
@@ -246,53 +249,136 @@ static void OnTxDone(void)
   /* USER CODE END OnTxDone */
 }
 
+static void AES_SetCounter(uint32_t counter)
+{
+  static uint32_t iv[4];
+
+  iv[0] = 0x00000000;
+  iv[1] = 0x00000000;
+  iv[2] = 0x00000000;
+  iv[3] = counter;
+
+  hcryp.Init.pInitVect = iv;
+  hcryp.Init.KeyIVConfigSkip = CRYP_KEYIVCONFIG_ALWAYS;
+
+  if (HAL_CRYP_Init(&hcryp) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
 static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraSnr_FskCfo)
 {
-  /* USER CODE BEGIN OnRxDone */
-  APP_LOG(TS_ON, VLEVEL_L, "OnRxDone\n\r");
-#if ((USE_MODEM_LORA == 1) && (USE_MODEM_FSK == 0))
-  APP_LOG(TS_ON, VLEVEL_L, "RssiValue=%d dBm, SnrValue=%ddB\n\r", rssi, LoraSnr_FskCfo);
-  /* Record payload Signal to noise ratio in Lora*/
-  SnrValue = LoraSnr_FskCfo;
-#endif /* USE_MODEM_LORA | USE_MODEM_FSK */
-#if ((USE_MODEM_LORA == 0) && (USE_MODEM_FSK == 1))
-  APP_LOG(TS_ON, VLEVEL_L, "RssiValue=%d dBm, Cfo=%dkHz\n\r", rssi, LoraSnr_FskCfo);
-  SnrValue = 0; /*not applicable in GFSK*/
-#endif /* USE_MODEM_LORA | USE_MODEM_FSK */
-  /* Update the State of the FSM*/
-  State = RX;
+  uint32_t rxCounter = 0;
+  uint32_t decrypted[4] = {0};
+  uint8_t plaintext[17] = {0};
+  char line[160];
+  int pos = 0;
 
-  RxBufferSize = size;
-  /* Clear BufferRx*/
-  memset(BufferRx, 0, MAX_APP_BUFFER_SIZE);
-  if (RxBufferSize < MAX_APP_BUFFER_SIZE)
-  {
-    memcpy(BufferRx, payload, RxBufferSize);
-    BufferRx[RxBufferSize] = '\0';
-  }
-  else
-  {
-	  memcpy(BufferRx, payload, MAX_APP_BUFFER_SIZE - 1);
-	  BufferRx[MAX_APP_BUFFER_SIZE -1] = '\0';
-	  RxBufferSize = MAX_APP_BUFFER_SIZE - 1;
-  }
-  /* Record Received Signal Strength*/
+  APP_LOG(TS_ON, VLEVEL_L, "OnRxDone\r\n");
+
+#if ((USE_MODEM_LORA == 1) && (USE_MODEM_FSK == 0))
+  APP_LOG(TS_ON, VLEVEL_L, "RssiValue=%d dBm, SnrValue=%ddB\r\n", rssi, LoraSnr_FskCfo);
+  SnrValue = LoraSnr_FskCfo;
+#endif
+
+#if ((USE_MODEM_LORA == 0) && (USE_MODEM_FSK == 1))
+  APP_LOG(TS_ON, VLEVEL_L, "RssiValue=%d dBm, Cfo=%dkHz\r\n", rssi, LoraSnr_FskCfo);
+  SnrValue = 0;
+#endif
+
+  State = RX;
   RssiValue = rssi;
-  /* Record payload content*/
-  APP_LOG(TS_ON, VLEVEL_H, "payload. size=%d \n\r", size);
-  for (int32_t i = 0; i < size; i++)
+  RxBufferSize = size;
+
+  memset(BufferRx, 0, MAX_APP_BUFFER_SIZE);
+
+  if (RxBufferSize > MAX_APP_BUFFER_SIZE)
   {
-    APP_LOG(TS_OFF, VLEVEL_H, "%02X", BufferRx[i]);
-    if (i % 16 == 15)
+    RxBufferSize = MAX_APP_BUFFER_SIZE;
+  }
+
+  memcpy(BufferRx, payload, RxBufferSize);
+
+  APP_LOG(TS_ON, VLEVEL_M, "Size received = %u\r\n", RxBufferSize);
+
+  pos = 0;
+  pos += snprintf(&line[pos], sizeof(line) - pos, "Packet: ");
+  for (uint16_t i = 0; i < RxBufferSize && pos < (int)sizeof(line) - 4; i++)
+  {
+    pos += snprintf(&line[pos], sizeof(line) - pos, "%02X ", BufferRx[i]);
+  }
+  snprintf(&line[pos], sizeof(line) - pos, "\r\n");
+  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
+
+  if (RxBufferSize != 20)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "Unexpected packet size: %u\r\n", RxBufferSize);
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+    return;
+  }
+
+  /* First 4 bytes = counter */
+  memcpy(&rxCounter, &BufferRx[0], 4);
+  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)rxCounter);
+
+  /* Rebuild CTR IV from received counter */
+  MX_AES_Init();
+  AES_SetCounter(rxCounter);
+
+  /* Decrypt only the 16-byte ciphertext part */
+  if (HAL_CRYP_Encrypt(&hcryp, (uint32_t *)&BufferRx[4], 4, decrypted, HAL_MAX_DELAY) != HAL_OK)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "AES CTR process error\r\n");
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+    return;
+  }
+
+  memcpy(plaintext, (uint8_t *)decrypted, 16);
+  plaintext[16] = '\0';
+
+  pos = 0;
+  pos += snprintf(&line[pos], sizeof(line) - pos, "Ciphertext only: ");
+  for (uint8_t i = 0; i < 16 && pos < (int)sizeof(line) - 4; i++)
+  {
+    pos += snprintf(&line[pos], sizeof(line) - pos, "%02X ", BufferRx[4 + i]);
+  }
+  snprintf(&line[pos], sizeof(line) - pos, "\r\n");
+  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
+
+  pos = 0;
+  pos += snprintf(&line[pos], sizeof(line) - pos, "Plaintext HEX: ");
+  for (uint8_t i = 0; i < 16 && pos < (int)sizeof(line) - 4; i++)
+  {
+    pos += snprintf(&line[pos], sizeof(line) - pos, "%02X ", plaintext[i]);
+  }
+  snprintf(&line[pos], sizeof(line) - pos, "\r\n");
+  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
+
+  pos = 0;
+  pos += snprintf(&line[pos], sizeof(line) - pos, "Plaintext ASCII: ");
+  for (uint8_t i = 0; i < 16 && pos < (int)sizeof(line) - 2; i++)
+  {
+    uint8_t c = plaintext[i];
+    if (c == 0)
     {
-      APP_LOG(TS_OFF, VLEVEL_H, "\n\r");
+      break;
+    }
+    if (c >= 32 && c <= 126)
+    {
+      line[pos++] = (char)c;
+    }
+    else
+    {
+      line[pos++] = '.';
     }
   }
-  APP_LOG(TS_OFF, VLEVEL_H, "\n\r");
-  APP_LOG(TS_ON, VLEVEL_M, "Message text: %s\r\n", (char *)BufferRx);
-  /* Run PingPong process in background*/
+  line[pos++] = '\r';
+  line[pos++] = '\n';
+  line[pos] = '\0';
+  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
+
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
-  /* USER CODE END OnRxDone */
 }
 
 static void OnTxTimeout(void)
@@ -397,31 +483,37 @@ static void PingPong_Process(void)
   {
     case RX:
       APP_LOG(TS_ON, VLEVEL_M, "RX done, listening again\r\n");
+      HAL_Delay(500);
       RadioRx();
       break;
 
     case RX_TIMEOUT:
       APP_LOG(TS_ON, VLEVEL_M, "RX timeout, listening again\r\n");
+      HAL_Delay(500);
       RadioRx();
       break;
 
     case RX_ERROR:
       APP_LOG(TS_ON, VLEVEL_M, "RX error, listening again\r\n");
+      HAL_Delay(500);
       RadioRx();
       break;
 
     case TX:
       APP_LOG(TS_ON, VLEVEL_M, "Unexpected TX state, returning to RX\r\n");
+      HAL_Delay(500);
       RadioRx();
       break;
 
     case TX_TIMEOUT:
       APP_LOG(TS_ON, VLEVEL_M, "Unexpected TX timeout, returning to RX\r\n");
+      HAL_Delay(500);
       RadioRx();
       break;
 
     default:
       APP_LOG(TS_ON, VLEVEL_M, "Unknown state, returning to RX\r\n");
+      HAL_Delay(500);
       RadioRx();
       break;
   }

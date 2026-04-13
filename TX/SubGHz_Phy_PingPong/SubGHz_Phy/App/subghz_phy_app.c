@@ -30,6 +30,7 @@
 #include "utilities_def.h"
 #include "app_version.h"
 #include "subghz_phy_version.h"
+#include "aes.h"
 /* USER CODE END Includes */
 
 /* External variables ---------------------------------------------------------*/
@@ -47,6 +48,12 @@ typedef enum
   TX,
   TX_TIMEOUT,
 } States_t;
+
+typedef struct
+{
+  uint32_t counter;
+  uint8_t ciphertext[16];
+} TxPacket_t;
 
 /* USER CODE END PTD */
 
@@ -102,7 +109,10 @@ bool isMaster = true;
 /* random delay to make sure 2 devices will sync*/
 /* the closest the random delays are, the longer it will
    take for the devices to sync when started simultaneously*/
+static uint32_t txCounter = 0;
+
 static int32_t random_delay;
+
 
 /* USER CODE END PV */
 
@@ -191,6 +201,7 @@ void SubghzApp_Init(void)
   RadioEvents.RxError = OnRxError;
 
   Radio.Init(&RadioEvents);
+  MX_AES_Init();
 
   /* USER CODE BEGIN SubghzApp_Init_2 */
   /*calculate random delay for synchronization*/
@@ -319,6 +330,24 @@ static void OnRxError(void)
   /* USER CODE END OnRxError */
 }
 
+static void AES_SetCounter(uint32_t counter)
+{
+  static uint32_t iv[4];
+
+  iv[0] = 0x00000000;
+  iv[1] = 0x00000000;
+  iv[2] = 0x00000000;
+  iv[3] = counter;
+
+  hcryp.Init.pInitVect = iv;
+  hcryp.Init.KeyIVConfigSkip = CRYP_KEYIVCONFIG_ALWAYS;
+
+  if (HAL_CRYP_Init(&hcryp) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
 /* USER CODE BEGIN PrFD */
 static void RadioSend(uint8_t size)
 {
@@ -339,6 +368,13 @@ static void RadioSend(uint8_t size)
 #else
 #error "Please define a modulation in the subghz_phy_app.h file."
 #endif /* USE_MODEM_LORA | USE_MODEM_FSK */
+
+  APP_LOG(TS_ON, VLEVEL_M, "encrypted message: ");
+    for (uint8_t i = 0; i < size; i++)
+    {
+      APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[i]);
+    }
+  APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
 
   Radio.Send(BufferTx, size);
 }
@@ -380,57 +416,96 @@ static void RadioRx(void)
   Radio.Rx(RX_TIMEOUT_VALUE);
 }
 
-static void PrepareTxPayload(void)
+static uint8_t PrepareTxPayload(void)
 {
+  uint32_t input[4] = {0};    /* 16 bytes plaintext */
+  uint32_t output[4] = {0};   /* 16 bytes ciphertext */
+  uint32_t counter = txCounter++;
+
+  APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", TX_MESSAGE);
+  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)counter);
+
   memset(BufferTx, 0, MAX_APP_BUFFER_SIZE);
-  memcpy(BufferTx, TX_MESSAGE, sizeof(TX_MESSAGE) - 1);
+
+  /* put plaintext into 16-byte block */
+  memcpy((uint8_t *)input, TX_MESSAGE, sizeof(TX_MESSAGE) - 1);
+
+  /* reset AES with IV/counter for this packet */
+  MX_AES_Init();
+  AES_SetCounter(counter);
+
+  /* encrypt one AES block */
+  if (HAL_CRYP_Encrypt(&hcryp, input, 4, output, HAL_MAX_DELAY) != HAL_OK)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "AES encrypt error\r\n");
+    return 0;
+  }
+
+  /* packet format:
+     BufferTx[0..3]  = counter
+     BufferTx[4..19] = ciphertext
+  */
+  memcpy(&BufferTx[0], &counter, 4);
+  memcpy(&BufferTx[4], (uint8_t *)output, 16);
+
+  /* print ciphertext only */
+  APP_LOG(TS_ON, VLEVEL_M, "encrypted message: ");
+  for (uint8_t i = 0; i < 16; i++)
+  {
+    APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[4 + i]);
+  }
+  APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
+
+  return 20;
 }
 
 static void PingPong_Process(void)
 {
+  uint8_t txsize;
+
   Radio.Sleep();
 
   switch (State)
   {
     case RX:
       APP_LOG(TS_ON, VLEVEL_M, "TX node unexpectedly received something\r\n");
+      HAL_Delay(500);
       RadioRx();
       break;
 
     case TX:
       APP_LOG(TS_ON, VLEVEL_M, "TX done, waiting before next send\r\n");
       HAL_Delay(3000);
-      PrepareTxPayload();
-      APP_LOG(TS_ON, VLEVEL_M, "Sending message: " TX_MESSAGE "\r\n");
-      RadioSend(sizeof(TX_MESSAGE) - 1);
+      txsize = PrepareTxPayload();
+      RadioSend(txsize);
       break;
 
     case RX_TIMEOUT:
       APP_LOG(TS_ON, VLEVEL_M, "Initial TX start\r\n");
-      PrepareTxPayload();
-      APP_LOG(TS_ON, VLEVEL_M, "Sending message: " TX_MESSAGE "\r\n");
-      RadioSend(sizeof(TX_MESSAGE) - 1);
+      HAL_Delay(500);
+      txsize = PrepareTxPayload();
+      RadioSend(txsize);
       break;
 
     case RX_ERROR:
       APP_LOG(TS_ON, VLEVEL_M, "RX error on TX node, sending again\r\n");
-      PrepareTxPayload();
-      APP_LOG(TS_ON, VLEVEL_M, "Sending message: " TX_MESSAGE "\r\n");
-      RadioSend(sizeof(TX_MESSAGE) - 1);
+      HAL_Delay(500);
+      txsize = PrepareTxPayload();
+      RadioSend(txsize);
       break;
 
     case TX_TIMEOUT:
       APP_LOG(TS_ON, VLEVEL_M, "TX timeout, retrying\r\n");
       HAL_Delay(1000);
-      PrepareTxPayload();
-      APP_LOG(TS_ON, VLEVEL_M, "Sending message: " TX_MESSAGE "\r\n");
-      RadioSend(sizeof(TX_MESSAGE) - 1);
+      txsize = PrepareTxPayload();
+      RadioSend(txsize);
       break;
 
     default:
       APP_LOG(TS_ON, VLEVEL_M, "Unknown state, sending again\r\n");
-      PrepareTxPayload();
-      RadioSend(sizeof(TX_MESSAGE) - 1);
+      HAL_Delay(500);
+      txsize = PrepareTxPayload();
+      RadioSend(txsize);
       break;
   }
 }
