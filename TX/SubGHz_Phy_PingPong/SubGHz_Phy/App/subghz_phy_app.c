@@ -31,10 +31,13 @@
 #include "app_version.h"
 #include "subghz_phy_version.h"
 #include "aes.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* External variables ---------------------------------------------------------*/
 /* USER CODE BEGIN EV */
+
+extern char tx_message[64];
 
 /* USER CODE END EV */
 
@@ -63,8 +66,6 @@ typedef struct
 /*Timeout*/
 #define RX_TIMEOUT_VALUE              3000
 #define TX_TIMEOUT_VALUE              3000
-/*TX string */
-#define TX_MESSAGE "HELLO_FROM_TX"
 /*Size of the payload to be sent*/
 /* Size must be greater of equal the PING and PONG*/
 #define MAX_APP_BUFFER_SIZE          255
@@ -418,45 +419,45 @@ static void RadioRx(void)
 
 static uint8_t PrepareTxPayload(void)
 {
-  uint32_t input[4] = {0};    /* 16 bytes plaintext */
-  uint32_t output[4] = {0};   /* 16 bytes ciphertext */
   uint32_t counter = txCounter++;
+  uint8_t msg_len = strlen(tx_message);
+  uint8_t padded_len = ((msg_len + 15) / 16) * 16;
 
-  APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", TX_MESSAGE);
+  uint8_t plain[64] = {0};
+  uint8_t cipher[64] = {0};
+
+  APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", tx_message);
   APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)counter);
 
   memset(BufferTx, 0, MAX_APP_BUFFER_SIZE);
-
-  /* put plaintext into 16-byte block */
-  memcpy((uint8_t *)input, TX_MESSAGE, sizeof(TX_MESSAGE) - 1);
+  memcpy(plain, tx_message, msg_len);
 
   /* reset AES with IV/counter for this packet */
   MX_AES_Init();
   AES_SetCounter(counter);
 
   /* encrypt one AES block */
-  if (HAL_CRYP_Encrypt(&hcryp, input, 4, output, HAL_MAX_DELAY) != HAL_OK)
+  if (HAL_CRYP_Encrypt(&hcryp,
+		  	  	  	    (uint32_t *)plain,
+						padded_len / 4,
+						(uint32_t *) cipher,
+						HAL_MAX_DELAY) != HAL_OK)
   {
     APP_LOG(TS_ON, VLEVEL_M, "AES encrypt error\r\n");
     return 0;
   }
 
-  /* packet format:
-     BufferTx[0..3]  = counter
-     BufferTx[4..19] = ciphertext
-  */
   memcpy(&BufferTx[0], &counter, 4);
-  memcpy(&BufferTx[4], (uint8_t *)output, 16);
+  memcpy(&BufferTx[4], cipher, padded_len);
 
-  /* print ciphertext only */
   APP_LOG(TS_ON, VLEVEL_M, "encrypted message: ");
-  for (uint8_t i = 0; i < 16; i++)
+  for (uint8_t i = 0; i < padded_len; i++)
   {
     APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[4 + i]);
   }
   APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
 
-  return 20;
+  return 4 + padded_len;
 }
 
 static void PingPong_Process(void)

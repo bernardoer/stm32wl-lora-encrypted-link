@@ -155,7 +155,7 @@ static void PingPong_Process(void);
 /**
   * @brief PingPong TX configure and process
   */
-static void RadioSend(void);
+static void RadioSend(uint8_t size);
 
 /**
   * @brief PingPong RX configure and process
@@ -270,10 +270,10 @@ static void AES_SetCounter(uint32_t counter)
 static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraSnr_FskCfo)
 {
   uint32_t rxCounter = 0;
-  uint32_t decrypted[4] = {0};
-  uint8_t plaintext[17] = {0};
-  char line[160];
+  char line[200];
   int pos = 0;
+  uint16_t cipher_len = 0;
+  uint8_t plaintext[MAX_APP_BUFFER_SIZE] = {0};
 
   APP_LOG(TS_ON, VLEVEL_L, "OnRxDone\r\n");
 
@@ -302,22 +302,30 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
 
   APP_LOG(TS_ON, VLEVEL_M, "Size received = %u\r\n", RxBufferSize);
 
-  pos = 0;
-  pos += snprintf(&line[pos], sizeof(line) - pos, "Packet: ");
-  for (uint16_t i = 0; i < RxBufferSize && pos < (int)sizeof(line) - 4; i++)
-  {
-    pos += snprintf(&line[pos], sizeof(line) - pos, "%02X ", BufferRx[i]);
-  }
-  snprintf(&line[pos], sizeof(line) - pos, "\r\n");
-  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
+//  pos = 0;
+//  pos += snprintf(&line[pos], sizeof(line) - pos, "Packet: ");
+//  for (uint16_t i = 0; i < RxBufferSize && pos < (int)sizeof(line) - 4; i++)
+//  {
+//    pos += snprintf(&line[pos], sizeof(line) - pos, "%02X ", BufferRx[i]);
+//  }
+//  snprintf(&line[pos], sizeof(line) - pos, "\r\n");
+//  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
 
-  if (RxBufferSize != 20)
+  if (RxBufferSize <= 4)
   {
-    APP_LOG(TS_ON, VLEVEL_M, "Unexpected packet size: %u\r\n", RxBufferSize);
+    APP_LOG(TS_ON, VLEVEL_M, "Packet too small\r\n");
     UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
     return;
   }
 
+  cipher_len = RxBufferSize - 4;
+
+  if ((cipher_len % 16) != 0)
+  {
+	  APP_LOG(TS_ON, VLEVEL_M, "Invalid ciphertext size: %u\r\n", cipher_len);
+	  UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+	  return;
+  }
   /* First 4 bytes = counter */
   memcpy(&rxCounter, &BufferRx[0], 4);
   APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)rxCounter);
@@ -327,55 +335,31 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
   AES_SetCounter(rxCounter);
 
   /* Decrypt only the 16-byte ciphertext part */
-  if (HAL_CRYP_Encrypt(&hcryp, (uint32_t *)&BufferRx[4], 4, decrypted, HAL_MAX_DELAY) != HAL_OK)
+  if (HAL_CRYP_Encrypt(&hcryp, (uint32_t *)&BufferRx[4], cipher_len / 4, (uint32_t *)plaintext, HAL_MAX_DELAY) != HAL_OK)
   {
     APP_LOG(TS_ON, VLEVEL_M, "AES CTR process error\r\n");
     UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
     return;
   }
 
-  memcpy(plaintext, (uint8_t *)decrypted, 16);
-  plaintext[16] = '\0';
-
-  pos = 0;
-  pos += snprintf(&line[pos], sizeof(line) - pos, "Ciphertext only: ");
-  for (uint8_t i = 0; i < 16 && pos < (int)sizeof(line) - 4; i++)
+  if (cipher_len < MAX_APP_BUFFER_SIZE)
   {
-    pos += snprintf(&line[pos], sizeof(line) - pos, "%02X ", BufferRx[4 + i]);
+	  plaintext[cipher_len] = '\0';
   }
-  snprintf(&line[pos], sizeof(line) - pos, "\r\n");
-  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
+  else
+  {
+	  plaintext[MAX_APP_BUFFER_SIZE -1] = '\0';
+  }
+
+  APP_LOG(TS_ON, VLEVEL_M, "Plaintext ASCII: %s\r\n", plaintext);
 
   pos = 0;
   pos += snprintf(&line[pos], sizeof(line) - pos, "Plaintext HEX: ");
-  for (uint8_t i = 0; i < 16 && pos < (int)sizeof(line) - 4; i++)
+  for (uint8_t i = 0; i < cipher_len && pos < (int)sizeof(line) - 4; i++)
   {
     pos += snprintf(&line[pos], sizeof(line) - pos, "%02X ", plaintext[i]);
   }
   snprintf(&line[pos], sizeof(line) - pos, "\r\n");
-  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
-
-  pos = 0;
-  pos += snprintf(&line[pos], sizeof(line) - pos, "Plaintext ASCII: ");
-  for (uint8_t i = 0; i < 16 && pos < (int)sizeof(line) - 2; i++)
-  {
-    uint8_t c = plaintext[i];
-    if (c == 0)
-    {
-      break;
-    }
-    if (c >= 32 && c <= 126)
-    {
-      line[pos++] = (char)c;
-    }
-    else
-    {
-      line[pos++] = '.';
-    }
-  }
-  line[pos++] = '\r';
-  line[pos++] = '\n';
-  line[pos] = '\0';
   APP_LOG(TS_ON, VLEVEL_M, "%s", line);
 
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
@@ -415,7 +399,7 @@ static void OnRxError(void)
 }
 
 /* USER CODE BEGIN PrFD */
-static void RadioSend(void)
+static void RadioSend(uint8_t size)
 {
 #if ((USE_MODEM_LORA == 1) && (USE_MODEM_FSK == 0))
   Radio.Sleep();
@@ -435,7 +419,7 @@ static void RadioSend(void)
 #error "Please define a modulation in the subghz_phy_app.h file."
 #endif /* USE_MODEM_LORA | USE_MODEM_FSK */
 
-  Radio.Send(BufferTx, PAYLOAD_LEN);
+  Radio.Send(BufferTx, size);
 }
 
 static void RadioRx(void)
@@ -449,7 +433,7 @@ static void RadioRx(void)
                     0, true, 0, 0, LORA_IQ_INVERSION_ON, true);
   if (LORA_FIX_LENGTH_PAYLOAD_ON == true)
   {
-    Radio.SetMaxPayloadLength(MODEM_LORA, PAYLOAD_LEN);
+	Radio.SetMaxPayloadLength(MODEM_LORA, MAX_APP_BUFFER_SIZE);
   }
   else
   {

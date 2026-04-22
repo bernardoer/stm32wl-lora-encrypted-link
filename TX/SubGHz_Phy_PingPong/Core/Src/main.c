@@ -23,7 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,16 +44,46 @@
 
 /* USER CODE BEGIN PV */
 
+char tx_message[64];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
+int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint16_t id_temperature, uint16_t id_humidity, uint16_t id_ldr, uint16_t id_frame, uint16_t temp, uint16_t rh, uint16_t ldr);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+uint8_t my_appKey[4] = {5,6,7,8};
+
+uint8_t id_node = 236;
+uint16_t id_temperature = 556;
+uint16_t id_humidity = 557;
+uint16_t id_ldr = 558;
+
+// Fake values to test
+
+uint16_t temp = 25;
+uint16_t rh = 60;
+uint16_t ldr = 20;
+
+int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint16_t id_temperature, uint16_t id_humidity, uint16_t id_ldr, uint16_t id_frame, uint16_t temp, uint16_t rh, uint16_t ldr){
+
+	sprintf(tx_message,
+		"%d%d%d%d\\!%d!%d#%d/%d#%d/%d#%d/%d",
+		my_appKey[0], my_appKey[1], my_appKey[2], my_appKey[3],
+		id_node,
+		id_frame,
+		id_temperature, temp,
+		id_humidity, rh,
+		id_ldr, ldr);
+
+	return 0;
+}
 
 /* USER CODE END 0 */
 
@@ -64,7 +94,7 @@ void SystemClock_Config(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+  uint16_t id_frame = 0;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -94,10 +124,12 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	prepare_message(tx_message, my_appKey, id_node, id_temperature, id_humidity, id_ldr, id_frame, temp, rh, ldr);
     /* USER CODE END WHILE */
     MX_SubGHz_Phy_Process();
 
     /* USER CODE BEGIN 3 */
+    id_frame ++;
   }
   /* USER CODE END 3 */
 }
