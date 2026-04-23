@@ -26,9 +26,9 @@
 
 CRYP_HandleTypeDef hcryp;
 __ALIGN_BEGIN static const uint32_t pKeyAES[4] __ALIGN_END = {
-                            0x00000000,0x00000000,0x00000000,0x00000000};
+	    					0xA3F19C42,0x7D8E5B61,0xC924FE37,0x15B0DDA8};
 __ALIGN_BEGIN static const uint32_t pInitVectAES[4] __ALIGN_END = {
-                            0x00000000,0x00000000,0x00000000,0x00000000};
+							0x1C2D3E4F,0x55667788,0x99AABBCC,0x00000000};
 
 /* AES init function */
 void MX_AES_Init(void)

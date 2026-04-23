@@ -74,7 +74,7 @@ uint16_t ldr = 20;
 int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint16_t id_temperature, uint16_t id_humidity, uint16_t id_ldr, uint16_t id_frame, uint16_t temp, uint16_t rh, uint16_t ldr){
 
 	sprintf(tx_message,
-		"%d%d%d%d\\!%d!%d#%d/%d#%d/%d#%d/%d",
+		"%d%d%d%d\\!%d!%03d#%d/%d#%d/%d#%d/%d",
 		my_appKey[0], my_appKey[1], my_appKey[2], my_appKey[3],
 		id_node,
 		id_frame,

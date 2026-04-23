@@ -203,24 +203,90 @@ static void AES_LoadCounter(uint32_t counter)
   }
 }
 
+//static uint8_t PrepareTxPayload(void)
+//{
+//  /* time measure */
+//
+//  uint32_t prepare_start, prepare_end, prepare_cycles;
+//  uint32_t enc_start, enc_end, enc_cycles;
+//
+//  APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", tx_message);
+//  uint32_t counter = txCounter++;
+//  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)counter);
+//
+//  prepare_start = DWT->CYCCNT;
+//
+//  uint8_t msg_len = (uint8_t)strnlen(tx_message, TX_MAX_MESSAGE_SIZE);
+//  uint8_t enc_len = (uint8_t)(((msg_len + 15U) / 16U) * 16U);
+//
+//  uint8_t plain[TX_MAX_MESSAGE_SIZE] = {0};
+//  uint8_t cipher[TX_MAX_MESSAGE_SIZE] = {0};
+//
+//  if (msg_len == 0U)
+//  {
+//    APP_LOG(TS_ON, VLEVEL_M, "Empty message\r\n");
+//    return 0;
+//  }
+//
+//  memcpy(plain, tx_message, msg_len);
+//
+//  AES_LoadCounter(counter);
+//
+//  enc_start = DWT->CYCCNT;
+//
+//  if (HAL_CRYP_Encrypt(&hcryp,
+//                       (uint32_t *)plain,
+//                       enc_len / 4U,
+//                       (uint32_t *)cipher,
+//                       HAL_MAX_DELAY) != HAL_OK)
+//  {
+//    APP_LOG(TS_ON, VLEVEL_M, "AES encrypt error\r\n");
+//    return 0;
+//  }
+//
+//  enc_end = DWT->CYCCNT;
+//  enc_cycles = enc_end - enc_start;
+//
+//  memcpy(BufferTx, &counter, TX_COUNTER_SIZE);
+//  memcpy(BufferTx + TX_COUNTER_SIZE, cipher, enc_len);
+//
+//  prepare_end = DWT->CYCCNT;
+//
+//  prepare_cycles = prepare_end - prepare_start;
+//
+//  APP_LOG(TS_ON, VLEVEL_M, "enc_cycles: %u\r\n", (unsigned int)enc_cycles);
+//  APP_LOG(TS_ON, VLEVEL_M, "prepare_cycles: %u\r\n", (unsigned int)prepare_cycles);
+//
+//  uint64_t enc_01us = ((uint64_t)enc_cycles * 100000000ULL) / SystemCoreClock;
+//  uint64_t prepare_01us = ((uint64_t)prepare_cycles * 100000000ULL) / SystemCoreClock;
+//
+//  APP_LOG(TS_ON, VLEVEL_M, "enc_time_us: %u.%02u\r\n",
+//          (unsigned int)(enc_01us / 100ULL),
+//          (unsigned int)(enc_01us % 100ULL));
+//
+//  APP_LOG(TS_ON, VLEVEL_M, "prepare_time_us: %u.%02u\r\n",
+//          (unsigned int)(prepare_01us / 100ULL),
+//          (unsigned int)(prepare_01us % 100ULL));
+//
+//  APP_LOG(TS_ON, VLEVEL_M, "encrypted message: ");
+//  for (uint8_t i = 0; i < enc_len; i++)
+//  {
+//    APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[TX_COUNTER_SIZE + i]);
+//  }
+//  APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
+//
+//  return (uint8_t)(TX_COUNTER_SIZE + enc_len);
+//}
+
 static uint8_t PrepareTxPayload(void)
 {
-  /* time measure */
-
   uint32_t prepare_start, prepare_end, prepare_cycles;
-  uint32_t enc_start, enc_end, enc_cycles;
 
   APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", tx_message);
-  uint32_t counter = txCounter++;
-  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)counter);
 
   prepare_start = DWT->CYCCNT;
 
   uint8_t msg_len = (uint8_t)strnlen(tx_message, TX_MAX_MESSAGE_SIZE);
-  uint8_t enc_len = (uint8_t)(((msg_len + 15U) / 16U) * 16U);
-
-  uint8_t plain[TX_MAX_MESSAGE_SIZE] = {0};
-  uint8_t cipher[TX_MAX_MESSAGE_SIZE] = {0};
 
   if (msg_len == 0U)
   {
@@ -228,54 +294,28 @@ static uint8_t PrepareTxPayload(void)
     return 0;
   }
 
-  memcpy(plain, tx_message, msg_len);
-
-  AES_LoadCounter(counter);
-
-  enc_start = DWT->CYCCNT;
-
-  if (HAL_CRYP_Encrypt(&hcryp,
-                       (uint32_t *)plain,
-                       enc_len / 4U,
-                       (uint32_t *)cipher,
-                       HAL_MAX_DELAY) != HAL_OK)
-  {
-    APP_LOG(TS_ON, VLEVEL_M, "AES encrypt error\r\n");
-    return 0;
-  }
-
-  enc_end = DWT->CYCCNT;
-  enc_cycles = enc_end - enc_start;
-
-  memcpy(BufferTx, &counter, TX_COUNTER_SIZE);
-  memcpy(BufferTx + TX_COUNTER_SIZE, cipher, enc_len);
+  memset(BufferTx, 0, MAX_APP_BUFFER_SIZE);
+  memcpy(BufferTx, tx_message, msg_len);
 
   prepare_end = DWT->CYCCNT;
-
   prepare_cycles = prepare_end - prepare_start;
 
-  APP_LOG(TS_ON, VLEVEL_M, "enc_cycles: %u\r\n", (unsigned int)enc_cycles);
   APP_LOG(TS_ON, VLEVEL_M, "prepare_cycles: %u\r\n", (unsigned int)prepare_cycles);
 
-  uint64_t enc_01us = ((uint64_t)enc_cycles * 100000000ULL) / SystemCoreClock;
   uint64_t prepare_01us = ((uint64_t)prepare_cycles * 100000000ULL) / SystemCoreClock;
-
-  APP_LOG(TS_ON, VLEVEL_M, "enc_time_us: %u.%02u\r\n",
-          (unsigned int)(enc_01us / 100ULL),
-          (unsigned int)(enc_01us % 100ULL));
 
   APP_LOG(TS_ON, VLEVEL_M, "prepare_time_us: %u.%02u\r\n",
           (unsigned int)(prepare_01us / 100ULL),
           (unsigned int)(prepare_01us % 100ULL));
 
-  APP_LOG(TS_ON, VLEVEL_M, "encrypted message: ");
-  for (uint8_t i = 0; i < enc_len; i++)
+  APP_LOG(TS_ON, VLEVEL_M, "plain message: ");
+  for (uint8_t i = 0; i < msg_len; i++)
   {
-    APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[TX_COUNTER_SIZE + i]);
+    APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[i]);
   }
   APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
 
-  return (uint8_t)(TX_COUNTER_SIZE + enc_len);
+  return msg_len;
 }
 
 static void RadioSend(uint8_t size)
