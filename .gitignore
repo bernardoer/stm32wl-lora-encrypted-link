@@ -5,6 +5,9 @@ Debug/
 Release/
 build/
 out/
+experiment/
+scripts/
+
 
 # =========================
 # Binaries / outputs
