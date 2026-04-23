@@ -34,6 +34,8 @@
 /* USER CODE BEGIN EV */
 
 extern char tx_message[64];
+extern uint8_t id_node;
+extern void tx_prepare_message(void);
 
 /* USER CODE END EV */
 
@@ -41,12 +43,12 @@ extern char tx_message[64];
 /* USER CODE BEGIN PTD */
 typedef enum
 {
-	APP_SEND_FIRST,
-	APP_SEND_NEXT,
-	APP_RETRY
+  APP_LISTEN,
+  APP_SEND_REPLY,
+  APP_REPLY_RETRY
 } AppState_t;
 
-static AppState_t AppState = APP_SEND_FIRST;
+static AppState_t AppState = APP_LISTEN;
 
 /* USER CODE END PTD */
 
@@ -55,13 +57,18 @@ static AppState_t AppState = APP_SEND_FIRST;
 /* Configurations */
 /*Timeout*/
 #define TX_TIMEOUT_VALUE              3000
+#define RX_TIMEOUT_VALUE              3000
 /* Size must be greater of equal the PING and PONG*/
 #define MAX_APP_BUFFER_SIZE          255
-/* Period between each message*/
-#define SEND_PERIOD_MS 3000
+#define REPLY_RETRY_DELAY_MS         1000
 
 #define TX_COUNTER_SIZE 4U
 #define TX_MAX_MESSAGE_SIZE 64U
+#define PROTO_MAGIC                  0xA5U
+#define PROTO_TYPE_REQUEST           0x01U
+#define PROTO_TYPE_DATA              0x02U
+#define PROTO_REQUEST_SIZE           5U
+#define PROTO_DATA_HEADER_SIZE       9U
 
 /* USER CODE END PD */
 
@@ -79,6 +86,8 @@ static RadioEvents_t RadioEvents;
 static uint8_t BufferTx[MAX_APP_BUFFER_SIZE];
 /* Last  Received Buffer Size*/
 static uint32_t txCounter = 0;
+static uint16_t pendingRequestSeq = 0;
+static uint8_t pendingReplySize = 0;
 
 /* USER CODE END PV */
 
@@ -91,6 +100,25 @@ static void OnTxDone(void);
   * @brief Function executed on Radio Tx Timeout event
   */
 static void OnTxTimeout(void);
+
+/**
+  * @brief Function to be executed on Radio Rx Done event
+  * @param  payload ptr of buffer received
+  * @param  size buffer size
+  * @param  rssi
+  * @param  LoraSnr_FskCfo
+  */
+static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraSnr_FskCfo);
+
+/**
+  * @brief Function executed on Radio Rx Timeout event
+  */
+static void OnRxTimeout(void);
+
+/**
+  * @brief Function executed on Radio Rx Error event
+  */
+static void OnRxError(void);
 
 
 /* USER CODE BEGIN PFP */
@@ -108,6 +136,11 @@ static uint8_t PrepareTxPayload(void);
   * @brief  TX configure and process send
   */
 static void RadioSend(uint8_t size);
+
+/**
+  * @brief  TX configure and process RX
+  */
+static void RadioRx(void);
 
 /**
   * @brief TX configure and process
@@ -133,9 +166,9 @@ void SubghzApp_Init(void)
   /* Radio initialization */
   RadioEvents.TxDone = OnTxDone;
   RadioEvents.TxTimeout = OnTxTimeout;
-  RadioEvents.RxDone = NULL;
-  RadioEvents.RxTimeout = NULL;
-  RadioEvents.RxError = NULL;
+  RadioEvents.RxDone = OnRxDone;
+  RadioEvents.RxTimeout = OnRxTimeout;
+  RadioEvents.RxError = OnRxError;
 
   Radio.Init(&RadioEvents);
   MX_AES_Init();
@@ -165,7 +198,7 @@ static void OnTxDone(void)
   /* USER CODE BEGIN OnTxDone */
   APP_LOG(TS_ON, VLEVEL_L, "Tx Done\n\r");
   /* Update the State of the FSM*/
-  AppState = APP_SEND_NEXT;
+  AppState = APP_LISTEN;
   /* Run PingPong process in background*/
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END OnTxDone */
@@ -176,10 +209,63 @@ static void OnTxTimeout(void)
   /* USER CODE BEGIN OnTxTimeout */
   APP_LOG(TS_ON, VLEVEL_L, "Tx Timeout\n\r");
   /* Update the State of the FSM*/
-  AppState = APP_RETRY;
+  AppState = APP_REPLY_RETRY;
   /* Run PingPong process in background*/
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END OnTxTimeout */
+}
+
+static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraSnr_FskCfo)
+{
+  uint16_t requestSeq = 0;
+  uint8_t requestedNodeId = 0;
+
+  APP_LOG(TS_ON, VLEVEL_L, "Rx Done\n\r");
+
+#if ((USE_MODEM_LORA == 1) && (USE_MODEM_FSK == 0))
+  APP_LOG(TS_ON, VLEVEL_L, "RssiValue=%d dBm, SnrValue=%ddB\r\n", rssi, LoraSnr_FskCfo);
+#endif
+
+  if ((size != PROTO_REQUEST_SIZE) || (payload[0] != PROTO_MAGIC) || (payload[1] != PROTO_TYPE_REQUEST))
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "Ignoring non-request packet\r\n");
+    AppState = APP_LISTEN;
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+    return;
+  }
+
+  requestedNodeId = payload[2];
+  requestSeq = (uint16_t)payload[3] | ((uint16_t)payload[4] << 8);
+
+  APP_LOG(TS_ON, VLEVEL_M, "Request for node %u seq %u\r\n",
+          (unsigned int)requestedNodeId,
+          (unsigned int)requestSeq);
+
+  if (requestedNodeId != id_node)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "Request not for this node (%u)\r\n", (unsigned int)id_node);
+    AppState = APP_LISTEN;
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+    return;
+  }
+
+  pendingRequestSeq = requestSeq;
+  AppState = APP_SEND_REPLY;
+  UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+}
+
+static void OnRxTimeout(void)
+{
+  APP_LOG(TS_ON, VLEVEL_L, "Rx Timeout\n\r");
+  AppState = APP_LISTEN;
+  UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+}
+
+static void OnRxError(void)
+{
+  APP_LOG(TS_ON, VLEVEL_L, "Rx Error\n\r");
+  AppState = APP_LISTEN;
+  UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
 }
 
 
@@ -203,90 +289,29 @@ static void AES_LoadCounter(uint32_t counter)
   }
 }
 
-//static uint8_t PrepareTxPayload(void)
-//{
-//  /* time measure */
-//
-//  uint32_t prepare_start, prepare_end, prepare_cycles;
-//  uint32_t enc_start, enc_end, enc_cycles;
-//
-//  APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", tx_message);
-//  uint32_t counter = txCounter++;
-//  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)counter);
-//
-//  prepare_start = DWT->CYCCNT;
-//
-//  uint8_t msg_len = (uint8_t)strnlen(tx_message, TX_MAX_MESSAGE_SIZE);
-//  uint8_t enc_len = (uint8_t)(((msg_len + 15U) / 16U) * 16U);
-//
-//  uint8_t plain[TX_MAX_MESSAGE_SIZE] = {0};
-//  uint8_t cipher[TX_MAX_MESSAGE_SIZE] = {0};
-//
-//  if (msg_len == 0U)
-//  {
-//    APP_LOG(TS_ON, VLEVEL_M, "Empty message\r\n");
-//    return 0;
-//  }
-//
-//  memcpy(plain, tx_message, msg_len);
-//
-//  AES_LoadCounter(counter);
-//
-//  enc_start = DWT->CYCCNT;
-//
-//  if (HAL_CRYP_Encrypt(&hcryp,
-//                       (uint32_t *)plain,
-//                       enc_len / 4U,
-//                       (uint32_t *)cipher,
-//                       HAL_MAX_DELAY) != HAL_OK)
-//  {
-//    APP_LOG(TS_ON, VLEVEL_M, "AES encrypt error\r\n");
-//    return 0;
-//  }
-//
-//  enc_end = DWT->CYCCNT;
-//  enc_cycles = enc_end - enc_start;
-//
-//  memcpy(BufferTx, &counter, TX_COUNTER_SIZE);
-//  memcpy(BufferTx + TX_COUNTER_SIZE, cipher, enc_len);
-//
-//  prepare_end = DWT->CYCCNT;
-//
-//  prepare_cycles = prepare_end - prepare_start;
-//
-//  APP_LOG(TS_ON, VLEVEL_M, "enc_cycles: %u\r\n", (unsigned int)enc_cycles);
-//  APP_LOG(TS_ON, VLEVEL_M, "prepare_cycles: %u\r\n", (unsigned int)prepare_cycles);
-//
-//  uint64_t enc_01us = ((uint64_t)enc_cycles * 100000000ULL) / SystemCoreClock;
-//  uint64_t prepare_01us = ((uint64_t)prepare_cycles * 100000000ULL) / SystemCoreClock;
-//
-//  APP_LOG(TS_ON, VLEVEL_M, "enc_time_us: %u.%02u\r\n",
-//          (unsigned int)(enc_01us / 100ULL),
-//          (unsigned int)(enc_01us % 100ULL));
-//
-//  APP_LOG(TS_ON, VLEVEL_M, "prepare_time_us: %u.%02u\r\n",
-//          (unsigned int)(prepare_01us / 100ULL),
-//          (unsigned int)(prepare_01us % 100ULL));
-//
-//  APP_LOG(TS_ON, VLEVEL_M, "encrypted message: ");
-//  for (uint8_t i = 0; i < enc_len; i++)
-//  {
-//    APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[TX_COUNTER_SIZE + i]);
-//  }
-//  APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
-//
-//  return (uint8_t)(TX_COUNTER_SIZE + enc_len);
-//}
-
 static uint8_t PrepareTxPayload(void)
 {
+  /* time measure */
+
   uint32_t prepare_start, prepare_end, prepare_cycles;
+  uint32_t enc_start, enc_end, enc_cycles;
+
+  tx_prepare_message();
 
   APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", tx_message);
+  uint32_t counter = txCounter++;
+  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)counter);
+  APP_LOG(TS_ON, VLEVEL_M, "replying as node %u for seq %u\r\n",
+          (unsigned int)id_node,
+          (unsigned int)pendingRequestSeq);
 
   prepare_start = DWT->CYCCNT;
 
   uint8_t msg_len = (uint8_t)strnlen(tx_message, TX_MAX_MESSAGE_SIZE);
+  uint8_t enc_len = (uint8_t)(((msg_len + 15U) / 16U) * 16U);
+
+  uint8_t plain[TX_MAX_MESSAGE_SIZE] = {0};
+  uint8_t cipher[TX_MAX_MESSAGE_SIZE] = {0};
 
   if (msg_len == 0U)
   {
@@ -294,28 +319,59 @@ static uint8_t PrepareTxPayload(void)
     return 0;
   }
 
-  memset(BufferTx, 0, MAX_APP_BUFFER_SIZE);
-  memcpy(BufferTx, tx_message, msg_len);
+  memcpy(plain, tx_message, msg_len);
+
+  AES_LoadCounter(counter);
+
+  enc_start = DWT->CYCCNT;
+
+  if (HAL_CRYP_Encrypt(&hcryp,
+                       (uint32_t *)plain,
+                       enc_len / 4U,
+                       (uint32_t *)cipher,
+                       HAL_MAX_DELAY) != HAL_OK)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "AES encrypt error\r\n");
+    return 0;
+  }
+
+  enc_end = DWT->CYCCNT;
+  enc_cycles = enc_end - enc_start;
+
+  BufferTx[0] = PROTO_MAGIC;
+  BufferTx[1] = PROTO_TYPE_DATA;
+  BufferTx[2] = id_node;
+  BufferTx[3] = (uint8_t)(pendingRequestSeq & 0xFFU);
+  BufferTx[4] = (uint8_t)((pendingRequestSeq >> 8) & 0xFFU);
+  memcpy(BufferTx + 5, &counter, TX_COUNTER_SIZE);
+  memcpy(BufferTx + PROTO_DATA_HEADER_SIZE, cipher, enc_len);
 
   prepare_end = DWT->CYCCNT;
+
   prepare_cycles = prepare_end - prepare_start;
 
+  APP_LOG(TS_ON, VLEVEL_M, "enc_cycles: %u\r\n", (unsigned int)enc_cycles);
   APP_LOG(TS_ON, VLEVEL_M, "prepare_cycles: %u\r\n", (unsigned int)prepare_cycles);
 
+  uint64_t enc_01us = ((uint64_t)enc_cycles * 100000000ULL) / SystemCoreClock;
   uint64_t prepare_01us = ((uint64_t)prepare_cycles * 100000000ULL) / SystemCoreClock;
+
+  APP_LOG(TS_ON, VLEVEL_M, "enc_time_us: %u.%02u\r\n",
+          (unsigned int)(enc_01us / 100ULL),
+          (unsigned int)(enc_01us % 100ULL));
 
   APP_LOG(TS_ON, VLEVEL_M, "prepare_time_us: %u.%02u\r\n",
           (unsigned int)(prepare_01us / 100ULL),
           (unsigned int)(prepare_01us % 100ULL));
 
-  APP_LOG(TS_ON, VLEVEL_M, "plain message: ");
-  for (uint8_t i = 0; i < msg_len; i++)
+  APP_LOG(TS_ON, VLEVEL_M, "encrypted message: ");
+  for (uint8_t i = 0; i < enc_len; i++)
   {
-    APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[i]);
+    APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[PROTO_DATA_HEADER_SIZE + i]);
   }
   APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
 
-  return msg_len;
+  return (uint8_t)(PROTO_DATA_HEADER_SIZE + enc_len);
 }
 
 static void RadioSend(uint8_t size)
@@ -335,32 +391,62 @@ static void RadioSend(uint8_t size)
   Radio.Send(BufferTx, size);
 }
 
+static void RadioRx(void)
+{
+#if ((USE_MODEM_LORA == 1) && (USE_MODEM_FSK == 0))
+  Radio.Sleep();
+  Radio.SetChannel(RF_FREQUENCY);
+  Radio.SetRxConfig(MODEM_LORA, LORA_BANDWIDTH, LORA_SPREADING_FACTOR,
+                    LORA_CODINGRATE, 0, LORA_PREAMBLE_LENGTH,
+                    LORA_SYMBOL_TIMEOUT, LORA_FIX_LENGTH_PAYLOAD_ON,
+                    0, true, 0, 0, LORA_IQ_INVERSION_ON, true);
+  Radio.SetMaxPayloadLength(MODEM_LORA, MAX_APP_BUFFER_SIZE);
+#else
+#error "Only LoRa mode handled in this simplified version"
+#endif /* USE_MODEM_LORA | USE_MODEM_FSK */
+
+  Radio.Rx(RX_TIMEOUT_VALUE);
+}
+
 static void SendNow(void)
 {
-    uint8_t size = PrepareTxPayload();
-    if(size > 0)
-    {
-        RadioSend(size);
-    }
+  pendingReplySize = PrepareTxPayload();
+
+  if (pendingReplySize > 0U)
+  {
+    RadioSend(pendingReplySize);
+  }
+  else
+  {
+    AppState = APP_LISTEN;
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+  }
 }
 
 static void AppProcess(void)
 {
   switch (AppState)
   {
-    case APP_SEND_FIRST:
-      APP_LOG(TS_ON, VLEVEL_M, "First send\r\n");
+    case APP_LISTEN:
+      APP_LOG(TS_ON, VLEVEL_M, "Listening for requests\r\n");
+      RadioRx();
+      break;
+
+    case APP_SEND_REPLY:
       SendNow();
       break;
 
-    case APP_SEND_NEXT:
-      HAL_Delay(SEND_PERIOD_MS);
-      SendNow();
-      break;
-
-    case APP_RETRY:
-      HAL_Delay(1000);
-      SendNow();
+    case APP_REPLY_RETRY:
+      HAL_Delay(REPLY_RETRY_DELAY_MS);
+      if (pendingReplySize > 0U)
+      {
+        RadioSend(pendingReplySize);
+      }
+      else
+      {
+        AppState = APP_LISTEN;
+        UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+      }
       break;
   }
 }

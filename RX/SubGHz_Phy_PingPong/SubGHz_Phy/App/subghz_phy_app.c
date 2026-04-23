@@ -43,12 +43,11 @@
 /* USER CODE BEGIN PTD */
 typedef enum
 {
-  RX,
-  RX_TIMEOUT,
-  RX_ERROR,
-  TX,
-  TX_TIMEOUT,
-} States_t;
+  APP_SEND_REQUEST,
+  APP_WAIT_RESPONSE,
+  APP_RESPONSE_OK,
+  APP_RETRY_REQUEST,
+} AppState_t;
 
 /* USER CODE END PTD */
 
@@ -58,18 +57,19 @@ typedef enum
 /*Timeout*/
 #define RX_TIMEOUT_VALUE              3000
 #define TX_TIMEOUT_VALUE              3000
-/* PING string*/
-#define PING "PING"
-/* PONG string*/
-#define PONG "PONG"
 /*Size of the payload to be sent*/
-/* Size must be greater of equal the PING and PONG*/
 #define MAX_APP_BUFFER_SIZE          255
 #if (PAYLOAD_LEN > MAX_APP_BUFFER_SIZE)
 #error PAYLOAD_LEN must be less or equal than MAX_APP_BUFFER_SIZE
 #endif /* (PAYLOAD_LEN > MAX_APP_BUFFER_SIZE) */
-/* wait for remote to be in Rx, before sending a Tx frame*/
-#define RX_TIME_MARGIN                200
+#define REQUEST_PERIOD_MS             3000
+#define REQUEST_RETRY_DELAY_MS        1000
+#define REQUEST_NODE_COUNT            4U
+#define PROTO_MAGIC                   0xA5U
+#define PROTO_TYPE_REQUEST            0x01U
+#define PROTO_TYPE_DATA               0x02U
+#define PROTO_REQUEST_SIZE            5U
+#define PROTO_DATA_HEADER_SIZE        9U
 /* Afc bandwidth in Hz */
 #define FSK_AFC_BANDWIDTH             83333
 /* LED blink Period*/
@@ -87,8 +87,8 @@ typedef enum
 static RadioEvents_t RadioEvents;
 
 /* USER CODE BEGIN PV */
-/*Ping Pong FSM states */
-static States_t State = RX;
+/* RX controller FSM state */
+static AppState_t AppState = APP_SEND_REQUEST;
 /* App Rx Buffer*/
 static uint8_t BufferRx[MAX_APP_BUFFER_SIZE];
 /* App Tx Buffer*/
@@ -103,10 +103,11 @@ int8_t SnrValue = 0;
 static UTIL_TIMER_Object_t timerLed;
 /* device state. Master: true, Slave: false*/
 bool isMaster = false;
-/* random delay to make sure 2 devices will sync*/
-/* the closest the random delays are, the longer it will
-   take for the devices to sync when started simultaneously*/
 static int32_t random_delay;
+static const uint8_t requestNodeIds[REQUEST_NODE_COUNT] = {236U, 237U, 238U, 239U};
+static uint8_t requestNodeIndex = 0;
+static uint8_t requestedNodeId = 0;
+static uint16_t requestSeq = 0;
 
 /* USER CODE END PV */
 
@@ -153,7 +154,17 @@ static void OnledEvent(void *context);
 static void PingPong_Process(void);
 
 /**
-  * @brief PingPong TX configure and process
+  * @brief Update the currently requested node from the round-robin list
+  */
+static void UpdateRequestedNode(void);
+
+/**
+  * @brief Build a request packet for the selected node
+  */
+static uint8_t PrepareRequestPayload(void);
+
+/**
+  * @brief Controller TX configure and process
   */
 static void RadioSend(uint8_t size);
 
@@ -169,7 +180,7 @@ void SubghzApp_Init(void)
 {
   /* USER CODE BEGIN SubghzApp_Init_1 */
 
-  APP_LOG(TS_OFF, VLEVEL_M, "\n\rPING PONG\n\r");
+  APP_LOG(TS_OFF, VLEVEL_M, "\n\rRX CONTROLLER\n\r");
   /* Get SubGHY_Phy APP version*/
   APP_LOG(TS_OFF, VLEVEL_M, "APPLICATION_VERSION: V%X.%X.%X\r\n",
           (uint8_t)(APP_VERSION_MAIN),
@@ -198,8 +209,8 @@ void SubghzApp_Init(void)
   MX_AES_Init();
 
   /* USER CODE BEGIN SubghzApp_Init_2 */
-  /*calculate random delay for synchronization*/
-  random_delay = (Radio.Random()) >> 22; /*10bits random e.g. from 0 to 1023 ms*/
+  random_delay = (Radio.Random()) >> 22;
+  UpdateRequestedNode();
 
   /* Radio Set frequency */
   Radio.SetChannel(RF_FREQUENCY);
@@ -227,9 +238,8 @@ void SubghzApp_Init(void)
   /*register task to to be run in while(1) after Radio IT*/
   UTIL_SEQ_RegTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), UTIL_SEQ_RFU, PingPong_Process);
 
-  /*starts first process */
   HAL_Delay(RX_TIMEOUT_VALUE + random_delay);
-  RadioRx();
+  UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END SubghzApp_Init_2 */
 }
 
@@ -241,10 +251,8 @@ void SubghzApp_Init(void)
 static void OnTxDone(void)
 {
   /* USER CODE BEGIN OnTxDone */
-  APP_LOG(TS_ON, VLEVEL_L, "OnTxDone\n\r");
-  /* Update the State of the FSM*/
-  State = TX;
-  /* Run PingPong process in background*/
+  APP_LOG(TS_ON, VLEVEL_L, "Request sent\n\r");
+  AppState = APP_WAIT_RESPONSE;
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END OnTxDone */
 }
@@ -270,6 +278,7 @@ static void AES_SetCounter(uint32_t counter)
 static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraSnr_FskCfo)
 {
   uint32_t rxCounter = 0;
+  uint16_t responseSeq = 0;
   char line[200];
   int pos = 0;
   uint16_t cipher_len = 0;
@@ -287,7 +296,6 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
   SnrValue = 0;
 #endif
 
-  State = RX;
   RssiValue = rssi;
   RxBufferSize = size;
 
@@ -311,33 +319,70 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
 //  snprintf(&line[pos], sizeof(line) - pos, "\r\n");
 //  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
 
-  if (RxBufferSize <= 4)
+  if (RxBufferSize < PROTO_DATA_HEADER_SIZE)
   {
     APP_LOG(TS_ON, VLEVEL_M, "Packet too small\r\n");
+    AppState = APP_WAIT_RESPONSE;
     UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
     return;
   }
 
-  cipher_len = RxBufferSize - 4;
+  if ((BufferRx[0] != PROTO_MAGIC) || (BufferRx[1] != PROTO_TYPE_DATA))
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "Ignoring packet with invalid protocol header\r\n");
+    AppState = APP_WAIT_RESPONSE;
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+    return;
+  }
+
+  if (BufferRx[2] != requestedNodeId)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "Ignoring response from node %u, waiting for %u\r\n",
+            (unsigned int)BufferRx[2],
+            (unsigned int)requestedNodeId);
+    AppState = APP_WAIT_RESPONSE;
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+    return;
+  }
+
+  responseSeq = (uint16_t)BufferRx[3] | ((uint16_t)BufferRx[4] << 8);
+  if (responseSeq != requestSeq)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "Ignoring response seq %u, waiting for seq %u\r\n",
+            (unsigned int)responseSeq,
+            (unsigned int)requestSeq);
+    AppState = APP_WAIT_RESPONSE;
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+    return;
+  }
+
+  cipher_len = RxBufferSize - PROTO_DATA_HEADER_SIZE;
 
   if ((cipher_len % 16) != 0)
   {
 	  APP_LOG(TS_ON, VLEVEL_M, "Invalid ciphertext size: %u\r\n", cipher_len);
+      AppState = APP_WAIT_RESPONSE;
 	  UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
 	  return;
   }
-  /* First 4 bytes = counter */
-  memcpy(&rxCounter, &BufferRx[0], 4);
-  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)rxCounter);
 
-  /* Rebuild CTR IV from received counter */
+  memcpy(&rxCounter, &BufferRx[5], 4);
+  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)rxCounter);
+  APP_LOG(TS_ON, VLEVEL_M, "Response from node %u for seq %u\r\n",
+          (unsigned int)requestedNodeId,
+          (unsigned int)responseSeq);
+
   MX_AES_Init();
   AES_SetCounter(rxCounter);
 
-  /* Decrypt only the 16-byte ciphertext part */
-  if (HAL_CRYP_Encrypt(&hcryp, (uint32_t *)&BufferRx[4], cipher_len / 4, (uint32_t *)plaintext, HAL_MAX_DELAY) != HAL_OK)
+  if (HAL_CRYP_Encrypt(&hcryp,
+                       (uint32_t *)&BufferRx[PROTO_DATA_HEADER_SIZE],
+                       cipher_len / 4,
+                       (uint32_t *)plaintext,
+                       HAL_MAX_DELAY) != HAL_OK)
   {
     APP_LOG(TS_ON, VLEVEL_M, "AES CTR process error\r\n");
+    AppState = APP_WAIT_RESPONSE;
     UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
     return;
   }
@@ -362,16 +407,15 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
   snprintf(&line[pos], sizeof(line) - pos, "\r\n");
   APP_LOG(TS_ON, VLEVEL_M, "%s", line);
 
+  AppState = APP_RESPONSE_OK;
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
 }
 
 static void OnTxTimeout(void)
 {
   /* USER CODE BEGIN OnTxTimeout */
-  APP_LOG(TS_ON, VLEVEL_L, "OnTxTimeout\n\r");
-  /* Update the State of the FSM*/
-  State = TX_TIMEOUT;
-  /* Run PingPong process in background*/
+  APP_LOG(TS_ON, VLEVEL_L, "Request Tx timeout\n\r");
+  AppState = APP_RETRY_REQUEST;
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END OnTxTimeout */
 }
@@ -379,10 +423,8 @@ static void OnTxTimeout(void)
 static void OnRxTimeout(void)
 {
   /* USER CODE BEGIN OnRxTimeout */
-  APP_LOG(TS_ON, VLEVEL_L, "OnRxTimeout\n\r");
-  /* Update the State of the FSM*/
-  State = RX_TIMEOUT;
-  /* Run PingPong process in background*/
+  APP_LOG(TS_ON, VLEVEL_L, "Response timeout\n\r");
+  AppState = APP_RETRY_REQUEST;
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END OnRxTimeout */
 }
@@ -390,15 +432,34 @@ static void OnRxTimeout(void)
 static void OnRxError(void)
 {
   /* USER CODE BEGIN OnRxError */
-  APP_LOG(TS_ON, VLEVEL_L, "OnRxError\n\r");
-  /* Update the State of the FSM*/
-  State = RX_ERROR;
-  /* Run PingPong process in background*/
+  APP_LOG(TS_ON, VLEVEL_L, "Response Rx error\n\r");
+  AppState = APP_RETRY_REQUEST;
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END OnRxError */
 }
 
 /* USER CODE BEGIN PrFD */
+static void UpdateRequestedNode(void)
+{
+  requestedNodeId = requestNodeIds[requestNodeIndex];
+}
+
+static uint8_t PrepareRequestPayload(void)
+{
+  memset(BufferTx, 0, MAX_APP_BUFFER_SIZE);
+  BufferTx[0] = PROTO_MAGIC;
+  BufferTx[1] = PROTO_TYPE_REQUEST;
+  BufferTx[2] = requestedNodeId;
+  BufferTx[3] = (uint8_t)(requestSeq & 0xFFU);
+  BufferTx[4] = (uint8_t)((requestSeq >> 8) & 0xFFU);
+
+  APP_LOG(TS_ON, VLEVEL_M, "Requesting node %u with seq %u\r\n",
+          (unsigned int)requestedNodeId,
+          (unsigned int)requestSeq);
+
+  return PROTO_REQUEST_SIZE;
+}
+
 static void RadioSend(uint8_t size)
 {
 #if ((USE_MODEM_LORA == 1) && (USE_MODEM_FSK == 0))
@@ -463,42 +524,42 @@ static void PingPong_Process(void)
 {
   Radio.Sleep();
 
-  switch (State)
+  switch (AppState)
   {
-    case RX:
-      APP_LOG(TS_ON, VLEVEL_M, "RX done, listening again\r\n");
-      HAL_Delay(500);
+    case APP_SEND_REQUEST:
+      RadioSend(PrepareRequestPayload());
+      break;
+
+    case APP_WAIT_RESPONSE:
+      APP_LOG(TS_ON, VLEVEL_M, "Waiting for response from node %u seq %u\r\n",
+              (unsigned int)requestedNodeId,
+              (unsigned int)requestSeq);
       RadioRx();
       break;
 
-    case RX_TIMEOUT:
-      APP_LOG(TS_ON, VLEVEL_M, "RX timeout, listening again\r\n");
-      HAL_Delay(500);
-      RadioRx();
+    case APP_RESPONSE_OK:
+      APP_LOG(TS_ON, VLEVEL_M, "Response handled, scheduling next request\r\n");
+      HAL_Delay(REQUEST_PERIOD_MS);
+      requestSeq++;
+      requestNodeIndex = (uint8_t)((requestNodeIndex + 1U) % REQUEST_NODE_COUNT);
+      UpdateRequestedNode();
+      AppState = APP_SEND_REQUEST;
+      UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
       break;
 
-    case RX_ERROR:
-      APP_LOG(TS_ON, VLEVEL_M, "RX error, listening again\r\n");
-      HAL_Delay(500);
-      RadioRx();
-      break;
-
-    case TX:
-      APP_LOG(TS_ON, VLEVEL_M, "Unexpected TX state, returning to RX\r\n");
-      HAL_Delay(500);
-      RadioRx();
-      break;
-
-    case TX_TIMEOUT:
-      APP_LOG(TS_ON, VLEVEL_M, "Unexpected TX timeout, returning to RX\r\n");
-      HAL_Delay(500);
-      RadioRx();
+    case APP_RETRY_REQUEST:
+      APP_LOG(TS_ON, VLEVEL_M, "Retrying request for node %u seq %u\r\n",
+              (unsigned int)requestedNodeId,
+              (unsigned int)requestSeq);
+      HAL_Delay(REQUEST_RETRY_DELAY_MS);
+      AppState = APP_SEND_REQUEST;
+      UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
       break;
 
     default:
-      APP_LOG(TS_ON, VLEVEL_M, "Unknown state, returning to RX\r\n");
-      HAL_Delay(500);
-      RadioRx();
+      APP_LOG(TS_ON, VLEVEL_M, "Unknown state, restarting request loop\r\n");
+      AppState = APP_SEND_REQUEST;
+      UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
       break;
   }
 }

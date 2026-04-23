@@ -33,6 +33,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#ifndef TX_NODE_ID
+#define TX_NODE_ID 236U
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -52,7 +55,17 @@ char tx_message[64];
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
-int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint16_t id_temperature, uint16_t id_humidity, uint16_t id_ldr, uint16_t id_frame, uint16_t temp, uint16_t rh, uint16_t ldr);
+static int prepare_message(char *tx_message,
+                           uint8_t *my_appKey,
+                           uint8_t id_node,
+                           uint16_t id_temperature,
+                           uint16_t id_humidity,
+                           uint16_t id_ldr,
+                           uint16_t id_frame,
+                           uint16_t temp,
+                           uint16_t rh,
+                           uint16_t ldr);
+void tx_prepare_message(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -60,7 +73,7 @@ int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint1
 
 uint8_t my_appKey[4] = {5,6,7,8};
 
-uint8_t id_node = 236;
+uint8_t id_node = TX_NODE_ID;
 uint16_t id_temperature = 556;
 uint16_t id_humidity = 557;
 uint16_t id_ldr = 558;
@@ -70,19 +83,45 @@ uint16_t id_ldr = 558;
 uint16_t temp = 25;
 uint16_t rh = 60;
 uint16_t ldr = 20;
+uint16_t tx_frame_id = 0;
 
-int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint16_t id_temperature, uint16_t id_humidity, uint16_t id_ldr, uint16_t id_frame, uint16_t temp, uint16_t rh, uint16_t ldr){
+static int prepare_message(char *tx_message,
+                           uint8_t *my_appKey,
+                           uint8_t id_node,
+                           uint16_t id_temperature,
+                           uint16_t id_humidity,
+                           uint16_t id_ldr,
+                           uint16_t id_frame,
+                           uint16_t temp,
+                           uint16_t rh,
+                           uint16_t ldr)
+{
+  snprintf(tx_message,
+           sizeof(char[64]),
+           "%d%d%d%d\\!%d!%03d#%d/%d#%d/%d#%d/%d",
+           my_appKey[0], my_appKey[1], my_appKey[2], my_appKey[3],
+           id_node,
+           id_frame,
+           id_temperature, temp,
+           id_humidity, rh,
+           id_ldr, ldr);
 
-	sprintf(tx_message,
-		"%d%d%d%d\\!%d!%03d#%d/%d#%d/%d#%d/%d",
-		my_appKey[0], my_appKey[1], my_appKey[2], my_appKey[3],
-		id_node,
-		id_frame,
-		id_temperature, temp,
-		id_humidity, rh,
-		id_ldr, ldr);
+  return 0;
+}
 
-	return 0;
+void tx_prepare_message(void)
+{
+  prepare_message(tx_message,
+                  my_appKey,
+                  id_node,
+                  id_temperature,
+                  id_humidity,
+                  id_ldr,
+                  tx_frame_id,
+                  temp,
+                  rh,
+                  ldr);
+  tx_frame_id++;
 }
 
 /* USER CODE END 0 */
@@ -93,10 +132,6 @@ int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint1
   */
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
-  uint16_t id_frame = 0;
-  /* USER CODE END 1 */
-
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
@@ -124,12 +159,9 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	prepare_message(tx_message, my_appKey, id_node, id_temperature, id_humidity, id_ldr, id_frame, temp, rh, ldr);
     /* USER CODE END WHILE */
     MX_SubGHz_Phy_Process();
-
     /* USER CODE BEGIN 3 */
-    id_frame ++;
   }
   /* USER CODE END 3 */
 }
