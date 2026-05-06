@@ -53,6 +53,7 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
 int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint16_t id_temperature, uint16_t id_humidity, uint16_t id_ldr, uint16_t id_frame, uint16_t temp, uint16_t rh, uint16_t ldr);
+void prepare_next_message(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -70,6 +71,7 @@ uint16_t id_ldr = 558;
 uint16_t temp = 25;
 uint16_t rh = 60;
 uint16_t ldr = 20;
+static uint16_t id_frame = 0;
 
 int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint16_t id_temperature, uint16_t id_humidity, uint16_t id_ldr, uint16_t id_frame, uint16_t temp, uint16_t rh, uint16_t ldr){
 
@@ -85,6 +87,12 @@ int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint1
 	return 0;
 }
 
+void prepare_next_message(void)
+{
+	prepare_message(tx_message, my_appKey, id_node, id_temperature, id_humidity, id_ldr, id_frame, temp, rh, ldr);
+	id_frame++;
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -93,10 +101,6 @@ int prepare_message(char* tx_message, uint8_t* my_appKey, uint8_t id_node, uint1
   */
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
-  uint16_t id_frame = 0;
-  /* USER CODE END 1 */
-
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
@@ -124,12 +128,9 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	prepare_message(tx_message, my_appKey, id_node, id_temperature, id_humidity, id_ldr, id_frame, temp, rh, ldr);
     /* USER CODE END WHILE */
     MX_SubGHz_Phy_Process();
-
     /* USER CODE BEGIN 3 */
-    id_frame ++;
   }
   /* USER CODE END 3 */
 }

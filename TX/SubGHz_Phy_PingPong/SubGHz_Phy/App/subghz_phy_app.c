@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "stm32_seq.h"
 #include "aes.h"
+#include "main.h"
 #include <string.h>
 /* USER CODE END Includes */
 
@@ -34,6 +35,7 @@
 /* USER CODE BEGIN EV */
 
 extern char tx_message[64];
+extern void prepare_next_message(void);
 
 /* USER CODE END EV */
 
@@ -43,7 +45,8 @@ typedef enum
 {
 	APP_SEND_FIRST,
 	APP_SEND_NEXT,
-	APP_RETRY
+	APP_RETRY,
+	APP_DONE
 } AppState_t;
 
 static AppState_t AppState = APP_SEND_FIRST;
@@ -58,7 +61,11 @@ static AppState_t AppState = APP_SEND_FIRST;
 /* Size must be greater of equal the PING and PONG*/
 #define MAX_APP_BUFFER_SIZE          255
 /* Period between each message*/
-#define SEND_PERIOD_MS 3000
+#define SEND_PERIOD_MS 10000
+#define MAX_TX_EMISSIONS 50U
+#ifndef USE_TX_AES
+#define USE_TX_AES 0
+#endif
 
 #define TX_COUNTER_SIZE 4U
 #define TX_MAX_MESSAGE_SIZE 64U
@@ -77,8 +84,11 @@ static RadioEvents_t RadioEvents;
 /* USER CODE BEGIN PV */
 /* App Tx Buffer*/
 static uint8_t BufferTx[MAX_APP_BUFFER_SIZE];
-/* Last  Received Buffer Size*/
+#if USE_TX_AES
+/* Counter used as the AES CTR nonce suffix. */
 static uint32_t txCounter = 0;
+#endif
+static uint32_t completedTxCount = 0;
 
 /* USER CODE END PV */
 
@@ -129,6 +139,11 @@ void SubghzApp_Init(void)
 {
   /* USER CODE BEGIN SubghzApp_Init_1 */
   APP_LOG(TS_OFF, VLEVEL_M, "\n\rTX APP\n\r");
+  APP_LOG(TS_OFF, VLEVEL_M, "Configured for %u emissions with %u ms interval\r\n",
+          (unsigned int)MAX_TX_EMISSIONS,
+          (unsigned int)SEND_PERIOD_MS);
+  APP_LOG(TS_OFF, VLEVEL_M, "AES payload mode: %s\r\n",
+          USE_TX_AES ? "enabled" : "disabled");
 
   /* Radio initialization */
   RadioEvents.TxDone = OnTxDone;
@@ -164,10 +179,22 @@ static void OnTxDone(void)
 {
   /* USER CODE BEGIN OnTxDone */
   APP_LOG(TS_ON, VLEVEL_L, "Tx Done\n\r");
-  /* Update the State of the FSM*/
-  AppState = APP_SEND_NEXT;
-  /* Run PingPong process in background*/
-  UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+  completedTxCount++;
+  APP_LOG(TS_ON, VLEVEL_M, "tx_count: %u/%u\r\n",
+          (unsigned int)completedTxCount,
+          (unsigned int)MAX_TX_EMISSIONS);
+  if (completedTxCount >= MAX_TX_EMISSIONS)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "Experiment complete\r\n");
+    AppState = APP_DONE;
+  }
+  else
+  {
+    /* Update the State of the FSM*/
+    AppState = APP_SEND_NEXT;
+    /* Run PingPong process in background*/
+    UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
+  }
   /* USER CODE END OnTxDone */
 }
 
@@ -280,6 +307,76 @@ static void AES_LoadCounter(uint32_t counter)
 
 static uint8_t PrepareTxPayload(void)
 {
+#if USE_TX_AES
+  uint32_t prepare_start, prepare_end, prepare_cycles;
+  uint32_t enc_start, enc_end, enc_cycles;
+
+  APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", tx_message);
+  uint32_t counter = txCounter++;
+  APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)counter);
+
+  prepare_start = DWT->CYCCNT;
+
+  uint8_t msg_len = (uint8_t)strnlen(tx_message, TX_MAX_MESSAGE_SIZE);
+  uint8_t enc_len = (uint8_t)(((msg_len + 15U) / 16U) * 16U);
+
+  uint8_t plain[TX_MAX_MESSAGE_SIZE] = {0};
+  uint8_t cipher[TX_MAX_MESSAGE_SIZE] = {0};
+
+  if (msg_len == 0U)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "Empty message\r\n");
+    return 0;
+  }
+
+  memcpy(plain, tx_message, msg_len);
+
+  AES_LoadCounter(counter);
+
+  enc_start = DWT->CYCCNT;
+
+  if (HAL_CRYP_Encrypt(&hcryp,
+                       (uint32_t *)plain,
+                       enc_len / 4U,
+                       (uint32_t *)cipher,
+                       HAL_MAX_DELAY) != HAL_OK)
+  {
+    APP_LOG(TS_ON, VLEVEL_M, "AES encrypt error\r\n");
+    return 0;
+  }
+
+  enc_end = DWT->CYCCNT;
+  enc_cycles = enc_end - enc_start;
+
+  memcpy(BufferTx, &counter, TX_COUNTER_SIZE);
+  memcpy(BufferTx + TX_COUNTER_SIZE, cipher, enc_len);
+
+  prepare_end = DWT->CYCCNT;
+  prepare_cycles = prepare_end - prepare_start;
+
+  APP_LOG(TS_ON, VLEVEL_M, "enc_cycles: %u\r\n", (unsigned int)enc_cycles);
+  APP_LOG(TS_ON, VLEVEL_M, "prepare_cycles: %u\r\n", (unsigned int)prepare_cycles);
+
+  uint64_t enc_01us = ((uint64_t)enc_cycles * 100000000ULL) / SystemCoreClock;
+  uint64_t prepare_01us = ((uint64_t)prepare_cycles * 100000000ULL) / SystemCoreClock;
+
+  APP_LOG(TS_ON, VLEVEL_M, "enc_time_us: %u.%02u\r\n",
+          (unsigned int)(enc_01us / 100ULL),
+          (unsigned int)(enc_01us % 100ULL));
+
+  APP_LOG(TS_ON, VLEVEL_M, "prepare_time_us: %u.%02u\r\n",
+          (unsigned int)(prepare_01us / 100ULL),
+          (unsigned int)(prepare_01us % 100ULL));
+
+  APP_LOG(TS_ON, VLEVEL_M, "encrypted message: ");
+  for (uint8_t i = 0; i < enc_len; i++)
+  {
+    APP_LOG(TS_OFF, VLEVEL_M, "%02X", BufferTx[TX_COUNTER_SIZE + i]);
+  }
+  APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
+
+  return (uint8_t)(TX_COUNTER_SIZE + enc_len);
+#else
   uint32_t prepare_start, prepare_end, prepare_cycles;
 
   APP_LOG(TS_ON, VLEVEL_M, "message: %s\r\n", tx_message);
@@ -316,6 +413,7 @@ static uint8_t PrepareTxPayload(void)
   APP_LOG(TS_OFF, VLEVEL_M, "\r\n");
 
   return msg_len;
+#endif
 }
 
 static void RadioSend(uint8_t size)
@@ -350,17 +448,22 @@ static void AppProcess(void)
   {
     case APP_SEND_FIRST:
       APP_LOG(TS_ON, VLEVEL_M, "First send\r\n");
+      prepare_next_message();
       SendNow();
       break;
 
     case APP_SEND_NEXT:
       HAL_Delay(SEND_PERIOD_MS);
+      prepare_next_message();
       SendNow();
       break;
 
     case APP_RETRY:
       HAL_Delay(1000);
       SendNow();
+      break;
+
+    case APP_DONE:
       break;
   }
 }
