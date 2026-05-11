@@ -64,11 +64,10 @@ static AppState_t AppState = APP_LISTEN;
 
 #define TX_COUNTER_SIZE 4U
 #define TX_MAX_MESSAGE_SIZE 64U
-#define PROTO_MAGIC                  0xA5U
-#define PROTO_TYPE_REQUEST           0x01U
-#define PROTO_TYPE_DATA              0x02U
-#define PROTO_REQUEST_SIZE           5U
-#define PROTO_DATA_HEADER_SIZE       9U
+#define PROTO_TYPE_REQUEST           0xF0U
+#define PROTO_TYPE_RESPONSE          0xF1U
+#define PROTO_REQUEST_SIZE           4U
+#define PROTO_DATA_HEADER_SIZE       8U
 
 /* USER CODE END PD */
 
@@ -226,7 +225,7 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
   APP_LOG(TS_ON, VLEVEL_L, "RssiValue=%d dBm, SnrValue=%ddB\r\n", rssi, LoraSnr_FskCfo);
 #endif
 
-  if ((size != PROTO_REQUEST_SIZE) || (payload[0] != PROTO_MAGIC) || (payload[1] != PROTO_TYPE_REQUEST))
+  if ((size != PROTO_REQUEST_SIZE) || (payload[0] != PROTO_TYPE_REQUEST))
   {
     APP_LOG(TS_ON, VLEVEL_M, "Ignoring non-request packet\r\n");
     AppState = APP_LISTEN;
@@ -234,8 +233,8 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
     return;
   }
 
-  requestedNodeId = payload[2];
-  requestSeq = (uint16_t)payload[3] | ((uint16_t)payload[4] << 8);
+  requestedNodeId = payload[1];
+  requestSeq = (uint16_t)payload[2] | ((uint16_t)payload[3] << 8);
 
   APP_LOG(TS_ON, VLEVEL_M, "Request for node %u seq %u\r\n",
           (unsigned int)requestedNodeId,
@@ -338,12 +337,11 @@ static uint8_t PrepareTxPayload(void)
   enc_end = DWT->CYCCNT;
   enc_cycles = enc_end - enc_start;
 
-  BufferTx[0] = PROTO_MAGIC;
-  BufferTx[1] = PROTO_TYPE_DATA;
-  BufferTx[2] = id_node;
-  BufferTx[3] = (uint8_t)(pendingRequestSeq & 0xFFU);
-  BufferTx[4] = (uint8_t)((pendingRequestSeq >> 8) & 0xFFU);
-  memcpy(BufferTx + 5, &counter, TX_COUNTER_SIZE);
+  BufferTx[0] = PROTO_TYPE_RESPONSE;
+  BufferTx[1] = id_node;
+  BufferTx[2] = (uint8_t)(pendingRequestSeq & 0xFFU);
+  BufferTx[3] = (uint8_t)((pendingRequestSeq >> 8) & 0xFFU);
+  memcpy(BufferTx + 4, &counter, TX_COUNTER_SIZE);
   memcpy(BufferTx + PROTO_DATA_HEADER_SIZE, cipher, enc_len);
 
   prepare_end = DWT->CYCCNT;

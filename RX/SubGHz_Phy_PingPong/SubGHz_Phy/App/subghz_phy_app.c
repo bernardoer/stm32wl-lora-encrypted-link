@@ -65,11 +65,10 @@ typedef enum
 #define REQUEST_PERIOD_MS             3000
 #define REQUEST_RETRY_DELAY_MS        1000
 #define REQUEST_NODE_COUNT            4U
-#define PROTO_MAGIC                   0xA5U
-#define PROTO_TYPE_REQUEST            0x01U
-#define PROTO_TYPE_DATA               0x02U
-#define PROTO_REQUEST_SIZE            5U
-#define PROTO_DATA_HEADER_SIZE        9U
+#define PROTO_TYPE_REQUEST            0xF0U
+#define PROTO_TYPE_RESPONSE           0xF1U
+#define PROTO_REQUEST_SIZE            4U
+#define PROTO_DATA_HEADER_SIZE        8U
 /* Afc bandwidth in Hz */
 #define FSK_AFC_BANDWIDTH             83333
 /* LED blink Period*/
@@ -327,7 +326,7 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
     return;
   }
 
-  if ((BufferRx[0] != PROTO_MAGIC) || (BufferRx[1] != PROTO_TYPE_DATA))
+  if (BufferRx[0] != PROTO_TYPE_RESPONSE)
   {
     APP_LOG(TS_ON, VLEVEL_M, "Ignoring packet with invalid protocol header\r\n");
     AppState = APP_WAIT_RESPONSE;
@@ -335,17 +334,17 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
     return;
   }
 
-  if (BufferRx[2] != requestedNodeId)
+  if (BufferRx[1] != requestedNodeId)
   {
     APP_LOG(TS_ON, VLEVEL_M, "Ignoring response from node %u, waiting for %u\r\n",
-            (unsigned int)BufferRx[2],
+            (unsigned int)BufferRx[1],
             (unsigned int)requestedNodeId);
     AppState = APP_WAIT_RESPONSE;
     UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
     return;
   }
 
-  responseSeq = (uint16_t)BufferRx[3] | ((uint16_t)BufferRx[4] << 8);
+  responseSeq = (uint16_t)BufferRx[2] | ((uint16_t)BufferRx[3] << 8);
   if (responseSeq != requestSeq)
   {
     APP_LOG(TS_ON, VLEVEL_M, "Ignoring response seq %u, waiting for seq %u\r\n",
@@ -366,7 +365,7 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
 	  return;
   }
 
-  memcpy(&rxCounter, &BufferRx[5], 4);
+  memcpy(&rxCounter, &BufferRx[4], 4);
   APP_LOG(TS_ON, VLEVEL_M, "counter: %u\r\n", (unsigned int)rxCounter);
   APP_LOG(TS_ON, VLEVEL_M, "Response from node %u for seq %u\r\n",
           (unsigned int)requestedNodeId,
@@ -447,11 +446,10 @@ static void UpdateRequestedNode(void)
 static uint8_t PrepareRequestPayload(void)
 {
   memset(BufferTx, 0, MAX_APP_BUFFER_SIZE);
-  BufferTx[0] = PROTO_MAGIC;
-  BufferTx[1] = PROTO_TYPE_REQUEST;
-  BufferTx[2] = requestedNodeId;
-  BufferTx[3] = (uint8_t)(requestSeq & 0xFFU);
-  BufferTx[4] = (uint8_t)((requestSeq >> 8) & 0xFFU);
+  BufferTx[0] = PROTO_TYPE_REQUEST;
+  BufferTx[1] = requestedNodeId;
+  BufferTx[2] = (uint8_t)(requestSeq & 0xFFU);
+  BufferTx[3] = (uint8_t)((requestSeq >> 8) & 0xFFU);
 
   APP_LOG(TS_ON, VLEVEL_M, "Requesting node %u with seq %u\r\n",
           (unsigned int)requestedNodeId,
