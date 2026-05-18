@@ -25,11 +25,8 @@
 #include "radio.h"
 
 /* USER CODE BEGIN Includes */
-#include "stm32_timer.h"
 #include "stm32_seq.h"
 #include "utilities_def.h"
-#include "app_version.h"
-#include "subghz_phy_version.h"
 #include "aes.h"
 #include "stdio.h"
 /* USER CODE END Includes */
@@ -53,11 +50,10 @@ typedef enum
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* Configurations */
-/*Timeout*/
+/* Controller timing */
 #define RX_TIMEOUT_VALUE              3000
 #define TX_TIMEOUT_VALUE              3000
-/*Size of the payload to be sent*/
+/* Request/response buffer size */
 #define MAX_APP_BUFFER_SIZE          255
 #if (PAYLOAD_LEN > MAX_APP_BUFFER_SIZE)
 #error PAYLOAD_LEN must be less or equal than MAX_APP_BUFFER_SIZE
@@ -65,14 +61,17 @@ typedef enum
 #define REQUEST_PERIOD_MS             3000
 #define REQUEST_RETRY_DELAY_MS        1000
 #define REQUEST_NODE_COUNT            4U
+/* Packet format:
+ * request:  [type, node_id, seq_lsb, seq_msb]
+ * response: [type, node_id, seq_lsb, seq_msb, counter_0..3, ciphertext...]
+ */
 #define PROTO_TYPE_REQUEST            0xF0U
 #define PROTO_TYPE_RESPONSE           0xF1U
 #define PROTO_REQUEST_SIZE            4U
 #define PROTO_DATA_HEADER_SIZE        8U
+#define PLAINTEXT_HEX_LINE_SIZE       200U
 /* Afc bandwidth in Hz */
 #define FSK_AFC_BANDWIDTH             83333
-/* LED blink Period*/
-#define LED_PERIOD_MS                 200
 
 /* USER CODE END PD */
 
@@ -88,9 +87,9 @@ static RadioEvents_t RadioEvents;
 /* USER CODE BEGIN PV */
 /* RX controller FSM state */
 static AppState_t AppState = APP_SEND_REQUEST;
-/* App Rx Buffer*/
+/* Response buffer */
 static uint8_t BufferRx[MAX_APP_BUFFER_SIZE];
-/* App Tx Buffer*/
+/* Request buffer */
 static uint8_t BufferTx[MAX_APP_BUFFER_SIZE];
 /* Last  Received Buffer Size*/
 uint16_t RxBufferSize = 0;
@@ -98,11 +97,6 @@ uint16_t RxBufferSize = 0;
 int8_t RssiValue = 0;
 /* Last  Received packer SNR (in Lora modulation)*/
 int8_t SnrValue = 0;
-/* Led Timers objects*/
-static UTIL_TIMER_Object_t timerLed;
-/* device state. Master: true, Slave: false*/
-bool isMaster = false;
-static int32_t random_delay;
 static const uint8_t requestNodeIds[REQUEST_NODE_COUNT] = {236U, 237U, 238U, 239U};
 static uint8_t requestNodeIndex = 0;
 static uint8_t requestedNodeId = 0;
@@ -142,15 +136,9 @@ static void OnRxError(void);
 
 /* USER CODE BEGIN PFP */
 /**
-  * @brief  Function executed on when led timer elapses
-  * @param  context ptr of LED context
+  * @brief Request/response controller state machine implementation
   */
-static void OnledEvent(void *context);
-
-/**
-  * @brief PingPong state machine implementation
-  */
-static void PingPong_Process(void);
+static void Controller_Process(void);
 
 /**
   * @brief Update the currently requested node from the round-robin list
@@ -168,7 +156,7 @@ static uint8_t PrepareRequestPayload(void);
 static void RadioSend(uint8_t size);
 
 /**
-  * @brief PingPong RX configure and process
+  * @brief Controller RX configure and process
   */
 static void RadioRx(void);
 
@@ -180,21 +168,6 @@ void SubghzApp_Init(void)
   /* USER CODE BEGIN SubghzApp_Init_1 */
 
   APP_LOG(TS_OFF, VLEVEL_M, "\n\rRX CONTROLLER\n\r");
-  /* Get SubGHY_Phy APP version*/
-  APP_LOG(TS_OFF, VLEVEL_M, "APPLICATION_VERSION: V%X.%X.%X\r\n",
-          (uint8_t)(APP_VERSION_MAIN),
-          (uint8_t)(APP_VERSION_SUB1),
-          (uint8_t)(APP_VERSION_SUB2));
-
-  /* Get MW SubGhz_Phy info */
-  APP_LOG(TS_OFF, VLEVEL_M, "MW_RADIO_VERSION:    V%X.%X.%X\r\n",
-          (uint8_t)(SUBGHZ_PHY_VERSION_MAIN),
-          (uint8_t)(SUBGHZ_PHY_VERSION_SUB1),
-          (uint8_t)(SUBGHZ_PHY_VERSION_SUB2));
-
-  /* Led Timers*/
-  UTIL_TIMER_Create(&timerLed, LED_PERIOD_MS, UTIL_TIMER_ONESHOT, OnledEvent, NULL);
-  UTIL_TIMER_Start(&timerLed);
   /* USER CODE END SubghzApp_Init_1 */
 
   /* Radio initialization */
@@ -208,36 +181,20 @@ void SubghzApp_Init(void)
   MX_AES_Init();
 
   /* USER CODE BEGIN SubghzApp_Init_2 */
-  random_delay = (Radio.Random()) >> 22;
   UpdateRequestedNode();
 
   /* Radio Set frequency */
   Radio.SetChannel(RF_FREQUENCY);
 
   /* Radio configuration */
-#if ((USE_MODEM_LORA == 1) && (USE_MODEM_FSK == 0))
-  APP_LOG(TS_OFF, VLEVEL_M, "---------------\n\r");
-  APP_LOG(TS_OFF, VLEVEL_M, "LORA_MODULATION\n\r");
-  APP_LOG(TS_OFF, VLEVEL_M, "LORA_BW=%d kHz\n\r", (1 << LORA_BANDWIDTH) * 125);
-  APP_LOG(TS_OFF, VLEVEL_M, "LORA_SF=%d\n\r", LORA_SPREADING_FACTOR);
-#elif ((USE_MODEM_LORA == 0) && (USE_MODEM_FSK == 1))
-  APP_LOG(TS_OFF, VLEVEL_M, "---------------\n\r");
-  APP_LOG(TS_OFF, VLEVEL_M, "FSK_MODULATION\n\r");
-  APP_LOG(TS_OFF, VLEVEL_M, "FSK_BW=%d Hz\n\r", FSK_BANDWIDTH);
-  APP_LOG(TS_OFF, VLEVEL_M, "FSK_DR=%d bits/s\n\r", FSK_DATARATE);
-#else
+#if !(((USE_MODEM_LORA == 1) && (USE_MODEM_FSK == 0)) || \
+      ((USE_MODEM_LORA == 0) && (USE_MODEM_FSK == 1)))
 #error "Please define a modulation in the subghz_phy_app.h file."
 #endif /* USE_MODEM_LORA | USE_MODEM_FSK */
 
-  /*fills tx buffer*/
-  memset(BufferTx, 0x0, MAX_APP_BUFFER_SIZE);
+  /* Register controller task to run from the sequencer after radio events. */
+  UTIL_SEQ_RegTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), UTIL_SEQ_RFU, Controller_Process);
 
-  APP_LOG(TS_ON, VLEVEL_L, "rand=%d\n\r", random_delay);
-
-  /*register task to to be run in while(1) after Radio IT*/
-  UTIL_SEQ_RegTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), UTIL_SEQ_RFU, PingPong_Process);
-
-  HAL_Delay(RX_TIMEOUT_VALUE + random_delay);
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END SubghzApp_Init_2 */
 }
@@ -278,7 +235,7 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
 {
   uint32_t rxCounter = 0;
   uint16_t responseSeq = 0;
-  char line[200];
+  char line[PLAINTEXT_HEX_LINE_SIZE];
   int pos = 0;
   uint16_t cipher_len = 0;
   uint8_t plaintext[MAX_APP_BUFFER_SIZE] = {0};
@@ -309,14 +266,7 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
 
   APP_LOG(TS_ON, VLEVEL_M, "Size received = %u\r\n", RxBufferSize);
 
-//  pos = 0;
-//  pos += snprintf(&line[pos], sizeof(line) - pos, "Packet: ");
-//  for (uint16_t i = 0; i < RxBufferSize && pos < (int)sizeof(line) - 4; i++)
-//  {
-//    pos += snprintf(&line[pos], sizeof(line) - pos, "%02X ", BufferRx[i]);
-//  }
-//  snprintf(&line[pos], sizeof(line) - pos, "\r\n");
-//  APP_LOG(TS_ON, VLEVEL_M, "%s", line);
+
 
   if (RxBufferSize < PROTO_DATA_HEADER_SIZE)
   {
@@ -371,9 +321,9 @@ static void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t LoraS
           (unsigned int)requestedNodeId,
           (unsigned int)responseSeq);
 
-  MX_AES_Init();
   AES_SetCounter(rxCounter);
 
+  /* AES-CTR uses the same HAL operation for encryption and decryption. */
   if (HAL_CRYP_Encrypt(&hcryp,
                        (uint32_t *)&BufferRx[PROTO_DATA_HEADER_SIZE],
                        cipher_len / 4,
@@ -518,7 +468,7 @@ static void RadioRx(void)
   Radio.Rx(RX_TIMEOUT_VALUE);
 }
 
-static void PingPong_Process(void)
+static void Controller_Process(void)
 {
   Radio.Sleep();
 
@@ -560,13 +510,6 @@ static void PingPong_Process(void)
       UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
       break;
   }
-}
-
-static void OnledEvent(void *context)
-{
-  HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin); /* LED_GREEN */
-  HAL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin); /* LED_RED */
-  UTIL_TIMER_Start(&timerLed);
 }
 
 /* USER CODE END PrFD */

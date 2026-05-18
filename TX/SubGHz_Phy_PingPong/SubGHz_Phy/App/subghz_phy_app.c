@@ -58,12 +58,16 @@ static AppState_t AppState = APP_LISTEN;
 /*Timeout*/
 #define TX_TIMEOUT_VALUE              3000
 #define RX_TIMEOUT_VALUE              3000
-/* Size must be greater of equal the PING and PONG*/
+/* Request/response buffer size */
 #define MAX_APP_BUFFER_SIZE          255
 #define REPLY_RETRY_DELAY_MS         1000
 
 #define TX_COUNTER_SIZE 4U
 #define TX_MAX_MESSAGE_SIZE 64U
+/* Packet format:
+ * request:  [type, node_id, seq_lsb, seq_msb]
+ * response: [type, node_id, seq_lsb, seq_msb, counter_0..3, ciphertext...]
+ */
 #define PROTO_TYPE_REQUEST           0xF0U
 #define PROTO_TYPE_RESPONSE          0xF1U
 #define PROTO_REQUEST_SIZE           4U
@@ -81,9 +85,9 @@ static AppState_t AppState = APP_LISTEN;
 static RadioEvents_t RadioEvents;
 
 /* USER CODE BEGIN PV */
-/* App Tx Buffer*/
+/* Response buffer */
 static uint8_t BufferTx[MAX_APP_BUFFER_SIZE];
-/* Last  Received Buffer Size*/
+/* AES-CTR counter used in response packets */
 static uint32_t txCounter = 0;
 static uint16_t pendingRequestSeq = 0;
 static uint8_t pendingReplySize = 0;
@@ -137,7 +141,7 @@ static uint8_t PrepareTxPayload(void);
 static void RadioSend(uint8_t size);
 
 /**
-  * @brief  TX configure and process RX
+  * @brief  Configure radio and listen for requests
   */
 static void RadioRx(void);
 
@@ -147,9 +151,9 @@ static void RadioRx(void);
 static void AppProcess(void);
 
 /**
-  * @brief Call the send of the packet
+  * @brief Prepare and send the response packet
   */
-static void SendNow(void);
+static void SendReply(void);
 
 static void DWT_Init(void);
 
@@ -198,7 +202,7 @@ static void OnTxDone(void)
   APP_LOG(TS_ON, VLEVEL_L, "Tx Done\n\r");
   /* Update the State of the FSM*/
   AppState = APP_LISTEN;
-  /* Run PingPong process in background*/
+  /* Run app process in background */
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END OnTxDone */
 }
@@ -209,7 +213,7 @@ static void OnTxTimeout(void)
   APP_LOG(TS_ON, VLEVEL_L, "Tx Timeout\n\r");
   /* Update the State of the FSM*/
   AppState = APP_REPLY_RETRY;
-  /* Run PingPong process in background*/
+  /* Run app process in background */
   UTIL_SEQ_SetTask((1 << CFG_SEQ_Task_SubGHz_Phy_App_Process), CFG_SEQ_Prio_0);
   /* USER CODE END OnTxTimeout */
 }
@@ -324,6 +328,7 @@ static uint8_t PrepareTxPayload(void)
 
   enc_start = DWT->CYCCNT;
 
+  /* AES-CTR encrypts the response payload before it is copied after the header. */
   if (HAL_CRYP_Encrypt(&hcryp,
                        (uint32_t *)plain,
                        enc_len / 4U,
@@ -406,7 +411,7 @@ static void RadioRx(void)
   Radio.Rx(RX_TIMEOUT_VALUE);
 }
 
-static void SendNow(void)
+static void SendReply(void)
 {
   pendingReplySize = PrepareTxPayload();
 
@@ -431,7 +436,7 @@ static void AppProcess(void)
       break;
 
     case APP_SEND_REPLY:
-      SendNow();
+      SendReply();
       break;
 
     case APP_REPLY_RETRY:
