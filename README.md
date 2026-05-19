@@ -84,10 +84,15 @@ Output:
 RX/SubGHz_Phy_PingPong/STM32CubeIDE/Debug/RX.bin
 ```
 
-## Scripts
+## Experiment Scripts
 
-- `scripts/build_tx_aes_compare.sh`: builds TX binaries with and without AES.
-- `scripts/build_tx_variants.sh`: builds TX variants for multiple node IDs.
-- `scripts/run_iotlab_*.sh`: scripts used to run experiments on FIT IoT-LAB.
-- `scripts/process_*.py` and `scripts/plot_*.py`: experiment data processing
-  and plotting helpers.
+Only the scripts below are used for the single-node AES vs non-AES experiment:
+
+- `scripts/build_tx_aes_compare.sh`: builds `TX_with_aes.bin` and
+  `TX_without_aes.bin`.
+- `scripts/run_iotlab_single_tx.sh`: runs one FIT IoT-LAB experiment using a
+  selected TX `.bin` file on one STM32WL node. Use it to test either the AES or
+  non-AES transmitter firmware in isolation.
+- `scripts/run_iotlab_single_tx_compare_batch.sh`: runs repeated single-node
+  experiments alternating `TX_with_aes.bin` and `TX_without_aes.bin`, generating
+  matched runs for the AES vs non-AES comparison.
