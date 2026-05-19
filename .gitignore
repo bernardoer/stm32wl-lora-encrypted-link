@@ -6,7 +6,15 @@ Release/
 build/
 out/
 experiment/
-scripts/
+
+# Keep the single-node AES vs non-AES experiment scripts tracked.
+# Ignore unrelated experiment/data-processing scripts.
+scripts/build_tx_variants.sh
+scripts/run_iotlab_5node_roundrobin.sh
+scripts/process_iotlab_5node_roundrobin.py
+scripts/plot_joule_comparison_svg.py
+scripts/process_iotlab_single_run.py
+scripts/wl55_recover.sh
 
 
 # =========================
